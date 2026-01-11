@@ -1,0 +1,964 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// USER & AUTHENTICATION
+// ============================================================================
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String
+  passwordHash  String
+  role          Role     @default(AGENT)
+  isActive      Boolean  @default(true)
+  avatarUrl     String?
+  phone         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  lastLoginAt   DateTime?
+
+  // Relations
+  enquiries     Enquiry[]
+  quotes        Quote[]
+  bookings      Booking[]
+  contracts     Contract[]
+  invoices      Invoice[]
+  tasks         Task[]
+  notes         Note[]
+  auditLogs     AuditLog[]
+  automationRules AutomationRule[]
+
+  @@index([email])
+  @@index([role])
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  AGENT
+  VIEWER
+}
+
+// ============================================================================
+// COMPANIES / CLIENTS
+// ============================================================================
+
+model Company {
+  id              String   @id @default(cuid())
+  name            String
+  companyNumber   String?  // UK Companies House number
+  vatNumber       String?  // UK VAT number
+  website         String?
+  industry        String?
+  size            String?  // e.g., "1-10", "11-50", "51-200", etc.
+  
+  // Address
+  addressLine1    String?
+  addressLine2    String?
+  city            String?
+  county          String?
+  postcode        String?
+  country         String   @default("GB")
+  
+  // Contact
+  phone           String?
+  email           String?
+  primaryContactId String?
+  
+  // Metadata
+  status          CompanyStatus @default(ACTIVE)
+  tags            String[]  @default([])
+  notes           String?
+  rating          Int?      // 1-5 stars
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime? // Soft delete for GDPR
+  
+  // Relations
+  contacts        Contact[]
+  enquiries       Enquiry[]
+  quotes          Quote[]
+  bookings        Booking[]
+  invoices        Invoice[]
+  notes          Note[]
+
+  @@index([name])
+  @@index([status])
+  @@index([deletedAt])
+}
+
+enum CompanyStatus {
+  ACTIVE
+  INACTIVE
+  PROSPECT
+  BLACKLISTED
+}
+
+model Contact {
+  id            String   @id @default(cuid())
+  companyId     String
+  firstName     String
+  lastName      String
+  jobTitle      String?
+  email         String?
+  phone         String?
+  mobile        String?
+  isPrimary     Boolean  @default(false)
+  notes         String?
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  deletedAt     DateTime?
+  
+  // Relations
+  company       Company  @relation(fields: [companyId], references: [id])
+  enquiries     Enquiry[]
+  quotes        Quote[]
+  bookings      Booking[]
+  contracts     Contract[]
+  invoices      Invoice[]
+  
+  @@index([companyId])
+  @@index([email])
+  @@index([deletedAt])
+}
+
+// ============================================================================
+// LEADS PIPELINE
+// ============================================================================
+
+model Enquiry {
+  id            String        @id @default(cuid())
+  companyId     String
+  contactId     String?
+  userId        String?       // Assigned agent
+  
+  // Enquiry details
+  subject       String
+  description   String?
+  enquiryType   EnquiryType   @default(WEDDING)
+  eventDate     DateTime?
+  eventLocation String?
+  estimatedGuests Int?
+  budget        Decimal?      @db.Decimal(10, 2)
+  
+  // Pipeline
+  status        EnquiryStatus @default(NEW)
+  source        String?       // e.g., "Website", "Referral", "Phone"
+  priority      Priority      @default(MEDIUM)
+  
+  // Metadata
+  tags          String[]      @default([])
+  customFields  Json?         // Flexible custom data
+  
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  convertedAt   DateTime?     // When converted to quote
+  deletedAt     DateTime?
+  
+  // Relations
+  company       Company       @relation(fields: [companyId], references: [id])
+  contact       Contact?      @relation(fields: [contactId], references: [id])
+  assignedTo    User?         @relation(fields: [userId], references: [id])
+  quotes        Quote[]
+  bookings      Booking[]
+  notes         Note[]
+  tasks         Task[]
+  emailThreads  EmailThread[]
+  
+  @@index([status])
+  @@index([companyId])
+  @@index([userId])
+  @@index([eventDate])
+  @@index([createdAt])
+  @@index([deletedAt])
+}
+
+enum EnquiryType {
+  WEDDING
+  CORPORATE
+  PRIVATE_PARTY
+  FESTIVAL
+  CLUB_NIGHT
+  OTHER
+}
+
+enum EnquiryStatus {
+  NEW
+  CONTACTED
+  QUOTED
+  NEGOTIATING
+  WON
+  LOST
+  ARCHIVED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+// ============================================================================
+// QUOTES
+// ============================================================================
+
+model Quote {
+  id              String        @id @default(cuid())
+  enquiryId       String?
+  companyId       String
+  contactId       String?
+  userId          String        // Created by
+  
+  quoteNumber     String        @unique
+  title           String
+  description     String?
+  
+  // Pricing
+  subtotal        Decimal       @db.Decimal(10, 2)
+  vatRate         Decimal       @default(0.20) @db.Decimal(5, 4) // 20% default UK VAT
+  vatAmount       Decimal       @db.Decimal(10, 2)
+  total           Decimal       @db.Decimal(10, 2)
+  currency        String        @default("GBP")
+  
+  // Details
+  quoteDate       DateTime      @default(now())
+  validUntil      DateTime?
+  eventDate       DateTime?
+  eventDuration   Int?          // Duration in minutes
+  location        String?
+  
+  // Status
+  status          QuoteStatus   @default(DRAFT)
+  
+  // Terms
+  paymentTerms    String?       // e.g., "50% deposit, 50% on completion"
+  cancellationTerms String?
+  notes           String?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  sentAt          DateTime?
+  acceptedAt      DateTime?
+  rejectedAt      DateTime?
+  deletedAt       DateTime?
+  
+  // Relations
+  enquiry         Enquiry?      @relation(fields: [enquiryId], references: [id])
+  company         Company       @relation(fields: [companyId], references: [id])
+  contact         Contact?      @relation(fields: [contactId], references: [id])
+  createdBy       User          @relation(fields: [userId], references: [id])
+  lineItems       QuoteLineItem[]
+  bookings        Booking[]
+  invoices        Invoice[]
+  notes           Note[]
+  
+  @@index([quoteNumber])
+  @@index([status])
+  @@index([companyId])
+  @@index([eventDate])
+  @@index([deletedAt])
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CONVERTED
+}
+
+model QuoteLineItem {
+  id            String   @id @default(cuid())
+  quoteId       String
+  description   String
+  quantity      Int      @default(1)
+  unitPrice     Decimal  @db.Decimal(10, 2)
+  vatRate       Decimal  @default(0.20) @db.Decimal(5, 4)
+  total         Decimal  @db.Decimal(10, 2)
+  sortOrder     Int      @default(0)
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  quote         Quote    @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  
+  @@index([quoteId])
+}
+
+// ============================================================================
+// BOOKINGS
+// ============================================================================
+
+model Booking {
+  id              String        @id @default(cuid())
+  enquiryId       String?
+  quoteId         String?
+  companyId       String
+  contactId       String?
+  userId          String        // Assigned performer/agent
+  
+  bookingNumber   String        @unique
+  title           String
+  
+  // Event details
+  eventDate       DateTime
+  eventTime       String?       // e.g., "19:00"
+  eventDuration   Int           // Duration in minutes
+  setupTime       Int?          // Setup time in minutes
+  location        String
+  locationDetails String?       // Parking, access, etc.
+  postcode        String?
+  
+  // Service details
+  serviceType     String?
+  specialRequests String?
+  requirements    String?       // Equipment, sound, lighting, etc.
+  
+  // Status
+  status          BookingStatus @default(CONFIRMED)
+  
+  // Financial
+  agreedPrice     Decimal       @db.Decimal(10, 2)
+  depositAmount   Decimal?      @db.Decimal(10, 2)
+  depositPaid     Boolean       @default(false)
+  balancePaid     Boolean       @default(false)
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  confirmedAt     DateTime?
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+  deletedAt       DateTime?
+  
+  // Relations
+  enquiry         Enquiry?      @relation(fields: [enquiryId], references: [id])
+  quote           Quote?        @relation(fields: [quoteId], references: [id])
+  company         Company       @relation(fields: [companyId], references: [id])
+  contact         Contact?      @relation(fields: [contactId], references: [id])
+  assignedTo      User          @relation(fields: [userId], references: [id])
+  contract        Contract?
+  invoices        Invoice[]
+  tasks           Task[]
+  notes           Note[]
+  calendarEvents  CalendarEvent[]
+  
+  @@index([bookingNumber])
+  @@index([status])
+  @@index([eventDate])
+  @@index([companyId])
+  @@index([userId])
+  @@index([deletedAt])
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+// ============================================================================
+// CONTRACTS WITH E-SIGN
+// ============================================================================
+
+model Contract {
+  id              String        @id @default(cuid())
+  bookingId       String        @unique
+  companyId       String
+  contactId       String?
+  
+  contractNumber  String        @unique
+  title           String
+  content         String        // Contract terms/content
+  templateId      String?       // Reference to email template used
+  
+  // E-signature
+  status          ContractStatus @default(DRAFT)
+  signedByClientAt DateTime?
+  signedByPerformerAt DateTime?
+  
+  // Signatures (stored as JSON or references to signed PDFs)
+  clientSignature Json?
+  performerSignature Json?
+  
+  // PDF storage
+  pdfUrl          String?       // URL to signed PDF
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  sentAt          DateTime?
+  completedAt     DateTime?
+  deletedAt       DateTime?
+  
+  // Relations
+  booking         Booking       @relation(fields: [bookingId], references: [id])
+  company         Company       @relation(fields: [companyId], references: [id])
+  contact         Contact?      @relation(fields: [contactId], references: [id])
+  
+  @@index([contractNumber])
+  @@index([status])
+  @@index([bookingId])
+  @@index([deletedAt])
+}
+
+enum ContractStatus {
+  DRAFT
+  SENT
+  SIGNED
+  COMPLETED
+  CANCELLED
+}
+
+// ============================================================================
+// INVOICES
+// ============================================================================
+
+model Invoice {
+  id              String        @id @default(cuid())
+  bookingId       String?
+  quoteId         String?
+  companyId       String
+  contactId       String?
+  userId          String        // Created by
+  
+  invoiceNumber   String        @unique
+  title           String
+  description     String?
+  
+  // Dates
+  invoiceDate     DateTime      @default(now())
+  dueDate         DateTime
+  paidDate        DateTime?
+  
+  // Pricing
+  subtotal        Decimal       @db.Decimal(10, 2)
+  vatRate         Decimal       @default(0.20) @db.Decimal(5, 4)
+  vatAmount       Decimal       @db.Decimal(10, 2)
+  total           Decimal       @db.Decimal(10, 2)
+  amountPaid      Decimal       @default(0) @db.Decimal(10, 2)
+  amountDue       Decimal       @db.Decimal(10, 2)
+  currency        String        @default("GBP")
+  
+  // Status
+  status          InvoiceStatus @default(DRAFT)
+  
+  // Payment terms
+  paymentTerms    String?
+  paymentMethod   String?       // Bank transfer, card, etc.
+  bankDetails     String?       // For UK bank transfers
+  
+  // PDF
+  pdfUrl          String?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  sentAt          DateTime?
+  deletedAt       DateTime?
+  
+  // Relations
+  booking         Booking?      @relation(fields: [bookingId], references: [id])
+  quote           Quote?        @relation(fields: [quoteId], references: [id])
+  company         Company       @relation(fields: [companyId], references: [id])
+  contact         Contact?      @relation(fields: [contactId], references: [id])
+  createdBy       User          @relation(fields: [userId], references: [id])
+  lineItems       InvoiceLineItem[]
+  payments        Payment[]
+  notes           Note[]
+  reminders       Reminder[]
+  
+  @@index([invoiceNumber])
+  @@index([status])
+  @@index([companyId])
+  @@index([dueDate])
+  @@index([deletedAt])
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PARTIAL
+  PAID
+  OVERDUE
+  CANCELLED
+  WRITTEN_OFF
+}
+
+model InvoiceLineItem {
+  id            String   @id @default(cuid())
+  invoiceId     String
+  description   String
+  quantity      Int      @default(1)
+  unitPrice     Decimal  @db.Decimal(10, 2)
+  vatRate       Decimal  @default(0.20) @db.Decimal(5, 4)
+  total         Decimal  @db.Decimal(10, 2)
+  sortOrder     Int      @default(0)
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  invoice       Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  
+  @@index([invoiceId])
+}
+
+// ============================================================================
+// PAYMENTS
+// ============================================================================
+
+model Payment {
+  id              String        @id @default(cuid())
+  invoiceId       String
+  companyId       String
+  
+  paymentNumber   String        @unique
+  amount          Decimal       @db.Decimal(10, 2)
+  currency        String        @default("GBP")
+  paymentDate     DateTime      @default(now())
+  paymentMethod   PaymentMethod
+  reference       String?       // Payment reference/transaction ID
+  
+  status          PaymentStatus @default(PENDING)
+  
+  notes           String?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  processedAt     DateTime?
+  deletedAt       DateTime?
+  
+  // Relations
+  invoice         Invoice       @relation(fields: [invoiceId], references: [id])
+  company         Company       @relation(fields: [companyId], references: [id])
+  
+  @@index([paymentNumber])
+  @@index([invoiceId])
+  @@index([paymentDate])
+  @@index([status])
+  @@index([deletedAt])
+}
+
+enum PaymentMethod {
+  BANK_TRANSFER
+  CARD
+  CASH
+  CHEQUE
+  PAYPAL
+  STRIPE
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+// ============================================================================
+// REMINDERS
+// ============================================================================
+
+model Reminder {
+  id              String        @id @default(cuid())
+  invoiceId       String?
+  bookingId       String?
+  enquiryId       String?
+  
+  title           String
+  description     String?
+  reminderType    ReminderType
+  dueDate         DateTime
+  isCompleted     Boolean       @default(false)
+  completedAt     DateTime?
+  
+  // Email automation
+  emailSent       Boolean       @default(false)
+  emailSentAt     DateTime?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deletedAt       DateTime?
+  
+  // Relations
+  invoice         Invoice?      @relation(fields: [invoiceId], references: [id])
+  booking         Booking?      @relation(fields: [bookingId], references: [id])
+  enquiry         Enquiry?      @relation(fields: [enquiryId], references: [id])
+  
+  @@index([dueDate])
+  @@index([isCompleted])
+  @@index([reminderType])
+  @@index([deletedAt])
+}
+
+enum ReminderType {
+  INVOICE_DUE
+  FOLLOW_UP
+  DEPOSIT_DUE
+  CONTRACT_SIGNING
+  EVENT_REMINDER
+  CUSTOM
+}
+
+// ============================================================================
+// TASKS
+// ============================================================================
+
+model Task {
+  id              String        @id @default(cuid())
+  enquiryId       String?
+  bookingId       String?
+  userId          String        // Assigned to
+  
+  title           String
+  description     String?
+  priority        Priority      @default(MEDIUM)
+  dueDate         DateTime?
+  isCompleted     Boolean       @default(false)
+  completedAt     DateTime?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deletedAt       DateTime?
+  
+  // Relations
+  enquiry         Enquiry?      @relation(fields: [enquiryId], references: [id])
+  booking         Booking?      @relation(fields: [bookingId], references: [id])
+  assignedTo      User          @relation(fields: [userId], references: [id])
+  
+  @@index([userId])
+  @@index([dueDate])
+  @@index([isCompleted])
+  @@index([deletedAt])
+}
+
+// ============================================================================
+// CALENDAR
+// ============================================================================
+
+model CalendarEvent {
+  id              String        @id @default(cuid())
+  bookingId       String?
+  
+  title           String
+  description     String?
+  eventType       CalendarEventType
+  startDateTime   DateTime
+  endDateTime     DateTime
+  location        String?
+  attendees       String[]      @default([])
+  
+  // Recurring
+  isRecurring     Boolean       @default(false)
+  recurrenceRule  String?       // RRULE format
+  
+  // Reminders
+  reminderMinutes Int[]         @default([]) // Minutes before to remind
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deletedAt       DateTime?
+  
+  // Relations
+  booking         Booking?      @relation(fields: [bookingId], references: [id])
+  
+  @@index([startDateTime])
+  @@index([endDateTime])
+  @@index([eventType])
+  @@index([deletedAt])
+}
+
+enum CalendarEventType {
+  GIG
+  MEETING
+  REHEARSAL
+  AVAILABILITY
+  PERSONAL
+  OTHER
+}
+
+// ============================================================================
+// EMAIL TEMPLATES & GMAIL SYNC
+// ============================================================================
+
+model EmailTemplate {
+  id              String        @id @default(cuid())
+  name            String
+  subject         String
+  body            String        // HTML or plain text
+  templateType    EmailTemplateType
+  category        String?       // e.g., "Quote", "Invoice", "Follow-up"
+  
+  // Variables available in template
+  variables       String[]      @default([]) // e.g., ["companyName", "quoteTotal"]
+  
+  isActive        Boolean       @default(true)
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deletedAt       DateTime?
+  
+  @@index([templateType])
+  @@index([category])
+  @@index([isActive])
+  @@index([deletedAt])
+}
+
+enum EmailTemplateType {
+  QUOTE
+  INVOICE
+  CONTRACT
+  FOLLOW_UP
+  REMINDER
+  THANK_YOU
+  CUSTOM
+}
+
+model EmailThread {
+  id              String        @id @default(cuid())
+  enquiryId       String?
+  
+  // Gmail sync
+  gmailThreadId   String?       @unique // Gmail thread ID
+  gmailMessageId  String?       @unique // Latest message ID
+  
+  subject         String
+  fromEmail       String
+  toEmail         String
+  ccEmail         String[]
+  bccEmail        String[]
+  
+  // Thread info
+  messageCount    Int           @default(1)
+  lastMessageAt   DateTime      @default(now())
+  
+  // Sync
+  syncedAt        DateTime      @default(now())
+  syncStatus      SyncStatus    @default(SUCCESS)
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  
+  // Relations
+  enquiry         Enquiry?      @relation(fields: [enquiryId], references: [id])
+  messages        EmailMessage[]
+  
+  @@index([gmailThreadId])
+  @@index([gmailMessageId])
+  @@index([enquiryId])
+  @@index([lastMessageAt])
+}
+
+model EmailMessage {
+  id              String        @id @default(cuid())
+  threadId        String
+  
+  // Gmail sync
+  gmailMessageId  String        @unique
+  
+  subject         String
+  fromEmail       String
+  toEmail         String
+  ccEmail         String[]
+  bccEmail        String[]
+  body            String        // HTML body
+  bodyPlain       String?       // Plain text body
+  
+  // Attachments (references to stored files)
+  attachmentUrls  String[]      @default([])
+  
+  // Direction
+  direction       EmailDirection // INBOUND or OUTBOUND
+  
+  receivedAt      DateTime
+  createdAt       DateTime      @default(now())
+  
+  // Relations
+  thread          EmailThread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  
+  @@index([gmailMessageId])
+  @@index([threadId])
+  @@index([receivedAt])
+  @@index([direction])
+}
+
+enum SyncStatus {
+  SUCCESS
+  FAILED
+  PENDING
+}
+
+enum EmailDirection {
+  INBOUND
+  OUTBOUND
+}
+
+// ============================================================================
+// AUTOMATION ENGINE
+// ============================================================================
+
+model AutomationRule {
+  id              String        @id @default(cuid())
+  userId          String?       // Created by (null = system)
+  name            String
+  description     String?
+  
+  // Trigger
+  triggerType     TriggerType
+  triggerConditions Json        // Flexible conditions
+  
+  // Actions
+  actions         Json          // Array of actions to execute
+  
+  // Status
+  isActive        Boolean       @default(true)
+  executionCount  Int           @default(0)
+  lastExecutedAt  DateTime?
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deletedAt       DateTime?
+  
+  // Relations
+  createdBy       User?         @relation(fields: [userId], references: [id])
+  executions      AutomationExecution[]
+  
+  @@index([triggerType])
+  @@index([isActive])
+  @@index([deletedAt])
+}
+
+enum TriggerType {
+  ENQUIRY_CREATED
+  ENQUIRY_STATUS_CHANGED
+  QUOTE_SENT
+  QUOTE_ACCEPTED
+  BOOKING_CONFIRMED
+  INVOICE_CREATED
+  INVOICE_DUE
+  PAYMENT_RECEIVED
+  TASK_COMPLETED
+  SCHEDULED
+  WEBHOOK
+}
+
+model AutomationExecution {
+  id              String        @id @default(cuid())
+  ruleId          String
+  
+  status          ExecutionStatus
+  triggerData     Json?         // Data that triggered the rule
+  result          Json?         // Execution results
+  errorMessage    String?
+  
+  startedAt       DateTime      @default(now())
+  completedAt     DateTime?
+  
+  // Relations
+  rule            AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  
+  @@index([ruleId])
+  @@index([status])
+  @@index([startedAt])
+}
+
+enum ExecutionStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+// ============================================================================
+// NOTES
+// ============================================================================
+
+model Note {
+  id              String        @id @default(cuid())
+  userId          String
+  companyId       String?
+  enquiryId       String?
+  quoteId         String?
+  bookingId       String?
+  invoiceId       String?
+  
+  content         String
+  isPrivate       Boolean       @default(false) // Only visible to creator
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deletedAt       DateTime?
+  
+  // Relations
+  createdBy       User          @relation(fields: [userId], references: [id])
+  company         Company?      @relation(fields: [companyId], references: [id])
+  enquiry         Enquiry?      @relation(fields: [enquiryId], references: [id])
+  quote           Quote?        @relation(fields: [quoteId], references: [id])
+  booking         Booking?      @relation(fields: [bookingId], references: [id])
+  invoice         Invoice?      @relation(fields: [invoiceId], references: [id])
+  
+  @@index([companyId])
+  @@index([enquiryId])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([deletedAt])
+}
+
+// ============================================================================
+// AUDIT LOG (GDPR Compliant)
+// ============================================================================
+
+model AuditLog {
+  id              String        @id @default(cuid())
+  userId          String?       // User who performed action (null = system)
+  
+  entityType      String        // e.g., "Company", "Enquiry", "Invoice"
+  entityId        String
+  action          AuditAction
+  
+  // Changes
+  oldValues       Json?
+  newValues       Json?
+  
+  // Metadata
+  ipAddress       String?
+  userAgent       String?
+  
+  createdAt       DateTime      @default(now())
+  
+  // Relations
+  user            User?         @relation(fields: [userId], references: [id])
+  
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  VIEW
+  EXPORT
+  LOGIN
+  LOGOUT
+}
